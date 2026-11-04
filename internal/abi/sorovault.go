@@ -115,3 +115,58 @@ func errorMessage(body []byte, status string) string {
 	}
 	return status
 }
+
+
+// RegisteredContract summarizes SoroVault's build metadata and interface for a contract.
+type RegisteredContract struct {
+	WasmHash  string     `json:"wasm_hash,omitempty"`
+	Interface *Interface `json:"interface,omitempty"`
+}
+
+// ContractBuild fetches both the registered WASM hash and interface from SoroVault.
+func (s *SoroVault) ContractBuild(ctx context.Context, network, contractID string) (*RegisteredContract, error) {
+	endpoint := s.baseURL + "/api/contracts/" + url.PathEscape(contractID)
+	if network != "" {
+		endpoint += "?network=" + url.QueryEscape(network)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := s.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("sorovault: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	if err != nil {
+		return nil, fmt.Errorf("sorovault: reading response: %w", err)
+	}
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusNotFound:
+		return nil, fmt.Errorf("%w: %s on %s", ErrUnknownContract, contractID, network)
+	default:
+		return nil, fmt.Errorf("sorovault: %s", errorMessage(body, resp.Status))
+	}
+	var rc RegisteredContract
+	if err := json.Unmarshal(body, &rc); err != nil {
+		return nil, fmt.Errorf("sorovault: decoding response: %w", err)
+	}
+	return &rc, nil
+}
+
+// VerifyLiveWasmHash compares the live on-chain WASM hash against SoroVault's registered build.
+// When the hashes differ, ok is false and typed decoding from the stale interface should be disabled.
+func VerifyLiveWasmHash(registeredHash, liveHash string) (ok bool, detail string) {
+	reg := strings.ToLower(strings.TrimSpace(registeredHash))
+	live := strings.ToLower(strings.TrimSpace(liveHash))
+	if reg == "" {
+		return true, "sorovault has no wasm hash recorded for this contract"
+	}
+	if reg == live {
+		return true, fmt.Sprintf("live wasm hash matches SoroVault registered build (%s)", reg)
+	}
+	return false, fmt.Sprintf("live wasm hash %s does not match SoroVault registered build %s; disabling stale interface decoding", live, reg)
+}
